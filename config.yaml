@@ -1,0 +1,66 @@
+mode: paper
+account:
+  account_id: ''
+  account_name: ''
+market:
+  instrument: NQ
+  timeframe_minutes: 1
+  vwap_anchor: globex
+  trading_window:
+    start_et: 09:30
+    end_et: '16:00'
+  flatten_et: '15:55'
+  extended_hours: true
+  extended_window:
+    start_et: '18:00'
+    end_et: '17:00'
+  extended_flatten_et: '16:59'
+strategy:
+  ema_fast: 20
+  ema_slow: 50
+  require_vwap: false
+  atr_period: 14
+  entry_on_momentum_candle: true
+  entry_on_prev_break: false
+  strong_candle_body_ratio: 0.5
+  strong_candle_atr_mult: 0.8
+  spike_atr_mult: 2.0
+  chop_ema_atr_mult: 0.25
+  no_entry_minutes_before_close: 15
+  risk_mode: fixed
+  stop_mode: candle
+  stop_swing_lookback: 5
+  tick_buffer: 2
+  tp_ratio: 1.2
+  fixed_stop_ticks: 20
+  fixed_tp_ticks: 60
+  enable_long: true
+  enable_short: true
+risk:
+  contracts_per_trade: 1
+  max_trades_per_day: 30
+  daily_loss_limit_currency: 1000.0
+  daily_profit_limit_currency: 0.0
+  max_consecutive_losses: 3
+  account_type: live_funded
+  trailing_drawdown_currency: 2000.0
+  trailing_drawdown_guard_enabled: false
+  trailing_drawdown_buffer: 200.0
+  flatten_on_disconnect: true
+execution:
+  entry_fill_model: next_open
+  slippage_ticks: 1
+  commission_per_side: 0.0
+  allow_live_orders: false
+  live_entry_order_type: market
+  max_live_contracts: 10
+exits:
+  trailing_stop_enabled: true
+  breakeven_trigger_pct: 10.0
+  trail_lock_pct: 50.0
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
+  notify_entry: true
+  notify_exit: true

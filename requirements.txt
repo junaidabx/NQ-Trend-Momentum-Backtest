@@ -1,0 +1,8 @@
+streamlit>=1.32
+plotly>=5.20
+pandas>=2.1
+numpy>=1.26
+pydantic>=2.6
+PyYAML>=6.0
+python-dateutil>=2.9
+tzdata>=2024.1
