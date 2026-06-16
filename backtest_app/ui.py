@@ -22,14 +22,22 @@ _CARD_CSS = """
     .stSelectbox div[data-baseweb="select"] > div,
     .stNumberInput input,
     .stTextInput input,
-    .stDateInput input,
-    .stTimeInput input,
     div[data-baseweb="input"] input,
     div[data-baseweb="select"] {
         background: #243049 !important;
         color: #f3f6fc !important;
         border: 1px solid #4a5f82 !important;
         border-radius: 10px !important;
+    }
+    /* date/time: custom input chrome breaks mobile pickers (React #185 loops) */
+    @media (min-width: 769px) {
+        .stDateInput input,
+        .stTimeInput input {
+            background: #243049 !important;
+            color: #f3f6fc !important;
+            border: 1px solid #4a5f82 !important;
+            border-radius: 10px !important;
+        }
     }
     div[data-baseweb="select"] > div {
         background: #243049 !important;

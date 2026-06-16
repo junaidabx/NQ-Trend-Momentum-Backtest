@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import time, timedelta
+from datetime import date, time, timedelta
 from pathlib import Path
 
 # Path setup must run before local package imports (Streamlit Cloud + reload safety).
@@ -75,28 +75,19 @@ def _cached_bars_from_upload(file_bytes: bytes, filename: str, target_tf: int):
     return load_bars_from_csv(io.BytesIO(file_bytes), target_timeframe_minutes=target_tf)
 
 
-def _time_input(label: str, default: time, key: str) -> time:
-    """Stable time widget — avoids mobile re-render loops from changing ``value``."""
-    if key not in st.session_state:
-        st.session_state[key] = default.replace(second=0, microsecond=0)
-    return st.time_input(label, step=timedelta(minutes=1), key=key)
+def _history_widget_key(data_key: str, field: str) -> str:
+    safe = data_key.replace(":", "").replace("|", "_").replace("+", "")
+    return f"hist_{field}_{safe}"
 
 
-def _init_history_widget_defaults(
-    *,
-    data_key: str,
-    start_date,
-    end_date,
-    start_time: time,
-    end_time: time,
-) -> None:
-    if st.session_state.get("hist_data_key") == data_key:
-        return
-    st.session_state.hist_data_key = data_key
-    st.session_state.hist_sd = start_date
-    st.session_state.hist_ed = end_date
-    st.session_state.hist_st = start_time
-    st.session_state.hist_et = end_time
+def _history_start_utc(sd: date) -> object:
+    return et_to_utc(sd, time(0, 0))
+
+
+def _history_end_utc(ed: date, *, last_utc, last_date: date) -> object:
+    if ed >= last_date:
+        return last_utc
+    return et_to_utc(ed, time(23, 59))
 
 
 def _render_history_window(bars, min_warmup: int) -> tuple[object, object, str]:
@@ -109,19 +100,10 @@ def _render_history_window(bars, min_warmup: int) -> tuple[object, object, str]:
     first_date = utc_to_et(first_utc).date()
     last_date = utc_to_et(last_utc).date()
     earliest_date = utc_to_et(earliest_utc).date()
-    def_start_date = def_start_et.date()
-    def_end_date = def_end_et.date()
-    def_start_time = def_start_et.time().replace(second=0, microsecond=0)
-    def_end_time = def_end_et.time().replace(second=0, microsecond=0)
+    def_start_date = max(first_date, min(def_start_et.date(), last_date))
+    def_end_date = last_date
 
     data_key = f"{first_utc.isoformat()}|{last_utc.isoformat()}|{min_warmup}"
-    _init_history_widget_defaults(
-        data_key=data_key,
-        start_date=def_start_date,
-        end_date=def_end_date,
-        start_time=def_start_time,
-        end_time=def_end_time,
-    )
 
     st.markdown(
         f"**Available data (ET):** {fmt_et(first_utc)} → {fmt_et(last_utc)} · "
@@ -130,47 +112,40 @@ def _render_history_window(bars, min_warmup: int) -> tuple[object, object, str]:
     st.caption(
         "CSV `time` column is **Unix UTC** (TradingView export). "
         f"Example: first bar stored as UTC **{first_utc.strftime('%Y-%m-%d %H:%M')}** → "
-        f"**{fmt_et(first_utc)} ET**. Session windows and trade times use **America/New_York**. "
-        "Default range = **3 calendar months** ending at the latest bar."
+        f"**{fmt_et(first_utc)} ET**. Default = **3 calendar months** through the latest bar. "
+        "End date is capped at the last bar in the file."
     )
 
-    st.markdown("**History start**")
-    c1, c2 = st.columns(2)
-    with c1:
-        sd = st.date_input(
-            "Start date",
-            min_value=first_date,
-            max_value=last_date,
-            key="hist_sd",
-        )
-    with c2:
-        st_ = _time_input("Start time (ET)", def_start_time, "hist_st")
-
-    st.markdown("**History end**")
-    c3, c4 = st.columns(2)
-    with c3:
-        ed = st.date_input(
-            "End date",
-            min_value=first_date,
-            max_value=last_date,
-            key="hist_ed",
-        )
-    with c4:
-        et_ = _time_input("End time (ET)", def_end_time, "hist_et")
+    sd = st.date_input(
+        "History start date (ET)",
+        value=def_start_date,
+        min_value=first_date,
+        max_value=last_date,
+        key=_history_widget_key(data_key, "sd"),
+        help="Start of selected day (00:00 ET).",
+    )
+    ed = st.date_input(
+        "History end date (ET)",
+        value=def_end_date,
+        min_value=first_date,
+        max_value=last_date,
+        key=_history_widget_key(data_key, "ed"),
+        help="Through end of selected day, or exact last bar time on the final CSV date.",
+    )
 
     if sd > ed:
         st.error("History start date must be on or before end date.")
     if sd < earliest_date:
         st.warning(f"Warmup required — earliest test start **{fmt_et(earliest_utc)}**")
 
-    start_utc = et_to_utc(sd, st_)
-    end_utc = et_to_utc(ed, et_)
+    start_utc = _history_start_utc(sd)
+    end_utc = _history_end_utc(ed, last_utc=last_utc, last_date=last_date)
     if end_utc > last_utc:
         end_utc = last_utc
-        if ed == last_date:
-            st.caption(f"End time capped at latest bar: **{fmt_et(last_utc)}**")
     if start_utc >= end_utc:
         st.error("History start must be before end.")
+    else:
+        st.caption(f"Selected window: **{fmt_et(start_utc)}** → **{fmt_et(end_utc)}**")
     return start_utc, end_utc, f"{fmt_et(start_utc)} → {fmt_et(end_utc)}"
 
 
