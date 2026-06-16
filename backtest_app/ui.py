@@ -154,6 +154,15 @@ _CARD_CSS = """
     }
     .bt-align b { color: #e8edf7; }
 
+    /* price chart — full width, normal height (bar size via candle count, not panel size) */
+    .price-chart-panel {
+        width: 100%;
+        margin: 0.25rem 0 0.5rem 0;
+    }
+    .price-chart-panel [data-testid="stPlotlyChart"] {
+        width: 100% !important;
+    }
+
     /* floating run button */
     .float-run-anchor {
         position: fixed;

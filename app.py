@@ -15,6 +15,7 @@ if str(ENGINE_SRC) not in sys.path:
 
 from backtest_app.charts import (  # noqa: E402
     PLOTLY_UI,
+    PRICE_CHART_UI,
     add_indicators,
     bars_to_df,
     drawdown_figure,
@@ -224,40 +225,58 @@ def main() -> None:
 
     run = floating_run_button()
 
-    if not run:
+    if run:
+        try:
+            data_slice = slice_for_backtest(
+                bars,
+                min_warmup=min_warmup,
+                start=start_utc,
+                end=end_utc,
+                source_timeframe_minutes=src_tf,
+                target_timeframe_minutes=tgt_tf,
+            )
+            with st.spinner("Running backtest…"):
+                result = run_backtest_with_warmup(
+                    cfg,
+                    data_slice.warmup_bars,
+                    data_slice.test_bars,
+                    starting_balance=starting_balance,
+                )
+            st.session_state["bt_result"] = result
+            st.session_state["bt_data_slice"] = data_slice
+            st.session_state["bt_report_ctx"] = ReportContext(
+                cfg=cfg,
+                data_slice=data_slice,
+                result=result,
+                starting_balance=starting_balance,
+                trade_start_et=trade_start,
+                trade_end_et=trade_end,
+                data_source=data_label,
+                history_mode=history_mode,
+            )
+            st.session_state["bt_cfg"] = cfg
+            st.session_state["bt_topstep_halts"] = topstep_halts
+            st.session_state["bt_starting_balance"] = starting_balance
+            st.session_state["bt_trade_start"] = trade_start
+            st.session_state["bt_trade_end"] = trade_end
+            st.session_state["bt_target_tf"] = target_tf
+        except Exception as exc:
+            st.error(f"Backtest failed: {exc}")
+            st.stop()
+
+    if "bt_result" not in st.session_state:
         st.info("Set parameters above, then click **▶ Run backtest** (bottom-right).")
         st.stop()
 
-    try:
-        data_slice = slice_for_backtest(
-            bars,
-            min_warmup=min_warmup,
-            start=start_utc,
-            end=end_utc,
-            source_timeframe_minutes=src_tf,
-            target_timeframe_minutes=tgt_tf,
-        )
-        with st.spinner("Running backtest…"):
-            result = run_backtest_with_warmup(
-                cfg,
-                data_slice.warmup_bars,
-                data_slice.test_bars,
-                starting_balance=starting_balance,
-            )
-    except Exception as exc:
-        st.error(f"Backtest failed: {exc}")
-        st.stop()
-
-    report_ctx = ReportContext(
-        cfg=cfg,
-        data_slice=data_slice,
-        result=result,
-        starting_balance=starting_balance,
-        trade_start_et=trade_start,
-        trade_end_et=trade_end,
-        data_source=data_label,
-        history_mode=history_mode,
-    )
+    result = st.session_state["bt_result"]
+    data_slice = st.session_state["bt_data_slice"]
+    report_ctx = st.session_state["bt_report_ctx"]
+    cfg = st.session_state["bt_cfg"]
+    topstep_halts = st.session_state["bt_topstep_halts"]
+    starting_balance = st.session_state["bt_starting_balance"]
+    trade_start = st.session_state["bt_trade_start"]
+    trade_end = st.session_state["bt_trade_end"]
+    target_tf = st.session_state["bt_target_tf"]
 
     # ── Results (below config) ────────────────────────────────────────
     st.divider()
@@ -323,36 +342,35 @@ def main() -> None:
             render_side_breakdown(result)
 
     with tab_chart:
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            chart_visible_bars = st.number_input(
-                "Visible bars",
-                min_value=10,
-                max_value=5000,
-                value=30,
-                step=10,
-                key="chart_visible_bars",
-                help="How many most-recent candles to show. Increase for more context; decrease for a zoomed-in view.",
-            )
-        with c2:
-            show_signals = st.checkbox("Show strategy signal bars (◆)", value=False, key="chart_show_signals")
-        chart_bars = data_slice.warmup_bars[-min(300, len(data_slice.warmup_bars)):] + data_slice.test_bars
+        chart_visible_bars = st.number_input(
+            "Candles on screen",
+            min_value=5,
+            max_value=120,
+            value=15,
+            step=1,
+            key="chart_visible_bars",
+            help="Fewer = wider, taller candles. All history stays loaded — drag left to scroll.",
+        )
+        chart_bars = data_slice.warmup_bars + data_slice.test_bars
         df = bars_to_df(chart_bars)
         df = add_indicators(df, cfg.strategy.ema_fast, cfg.strategy.ema_slow)
+        st.markdown('<div class="price-chart-panel">', unsafe_allow_html=True)
         st.plotly_chart(
             price_figure(
                 df,
                 trades_in_history_window(result, data_slice),
-                max_bars=int(chart_visible_bars),
-                show_signal_bars=show_signals,
+                visible_bars=int(chart_visible_bars),
+                timeframe_minutes=target_tf,
+                show_signal_bars=False,
             ),
             width="stretch",
-            config=PLOTLY_UI,
+            config=PRICE_CHART_UI,
         )
+        st.markdown("</div>", unsafe_allow_html=True)
         st.caption(
-            f"Showing last **{int(chart_visible_bars)}** bars · {target_tf}m · trade window {trade_start}–{trade_end} ET · "
-            "◆ optional signal bar · ▲/▼ = actual fill & exit · "
-            "**Drag to pan · scroll to zoom · double-click to reset**"
+            f"**{len(df):,}** bars loaded · **{int(chart_visible_bars)}** candles on screen · "
+            f"{target_tf}m · {trade_start}–{trade_end} ET · "
+            "Use **Candles on screen** to widen bars · drag left for older history"
         )
 
     with tab_trades:

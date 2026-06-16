@@ -17,8 +17,13 @@ PLOTLY_UI = {
     "scrollZoom": True,
     "displayModeBar": True,
     "displaylogo": False,
+    "responsive": True,
     "modeBarButtonsToRemove": ["lasso2d", "select2d"],
 }
+
+# Full-width price chart — responsive height via CSS + autosize.
+PRICE_CHART_UI = {**PLOTLY_UI, "responsive": True}
+PRICE_CHART_HEIGHT = 580
 
 
 def _apply_chart_interaction(fig: go.Figure) -> go.Figure:
@@ -321,11 +326,32 @@ def _add_position_bands(fig: go.Figure, trades: list[Trade], t_min: datetime, t_
         )
 
 
+def _viewport_xrange(viewport: pd.DataFrame, timeframe_minutes: int) -> list:
+    """X range for the visible window with half-bar padding so candles aren't clipped."""
+    if viewport.empty:
+        return []
+    pad = pd.Timedelta(minutes=max(1, timeframe_minutes) * 0.55)
+    return [
+        viewport["time_et"].iloc[0] - pad,
+        viewport["time_et"].iloc[-1] + pad,
+    ]
+
+
+def _viewport_yrange(viewport: pd.DataFrame) -> list[float]:
+    """Tight Y scale on the visible window so candles use vertical space."""
+    y_lo = float(viewport["low"].min())
+    y_hi = float(viewport["high"].max())
+    span = y_hi - y_lo
+    pad = max(span * 0.15, 3.0)
+    return [y_lo - pad, y_hi + pad]
+
+
 def price_figure(
     df: pd.DataFrame,
     trades: list[Trade],
     *,
-    max_bars: int = 30,
+    visible_bars: int = 15,
+    timeframe_minutes: int = 1,
     show_signal_bars: bool = False,
 ) -> go.Figure:
     if df.empty:
@@ -333,20 +359,23 @@ def price_figure(
         fig.update_layout(title="Price + trades", height=640)
         return fig
 
-    view = df.tail(max_bars).copy()
-    offset = _price_offset(view)
-    t_min = view["time"].min()
-    t_max = view["time"].max()
+    full = df.copy()
+    n_visible = min(max(1, visible_bars), len(full))
+    # All bars are plotted; x-axis range sets the initial viewport only.
+    viewport = full.iloc[-n_visible:]
+    offset = _price_offset(viewport)
+    t_min = full["time"].min()
+    t_max = full["time"].max()
 
     fig = make_subplots(rows=1, cols=1)
 
     fig.add_trace(
         go.Candlestick(
-            x=view["time_et"],
-            open=view["open"],
-            high=view["high"],
-            low=view["low"],
-            close=view["close"],
+            x=full["time_et"],
+            open=full["open"],
+            high=full["high"],
+            low=full["low"],
+            close=full["close"],
             name="NQ",
             increasing_line_color="#26a69a",
             decreasing_line_color="#ef5350",
@@ -354,21 +383,21 @@ def price_figure(
             decreasing_fillcolor="#ef5350",
         )
     )
-    if "ema_fast" in view.columns:
+    if "ema_fast" in full.columns:
         fig.add_trace(
             go.Scatter(
-                x=view["time_et"],
-                y=view["ema_fast"],
+                x=full["time_et"],
+                y=full["ema_fast"],
                 mode="lines",
                 name="EMA fast",
                 line=dict(color="#ffb74d", width=1.6),
             )
         )
-    if "ema_slow" in view.columns:
+    if "ema_slow" in full.columns:
         fig.add_trace(
             go.Scatter(
-                x=view["time_et"],
-                y=view["ema_slow"],
+                x=full["time_et"],
+                y=full["ema_slow"],
                 mode="lines",
                 name="EMA slow",
                 line=dict(color="#42a5f5", width=1.6),
@@ -377,7 +406,7 @@ def price_figure(
 
     _add_position_bands(fig, trades, t_min, t_max)
     if show_signal_bars:
-        _add_signal_markers(fig, view, trades)
+        _add_signal_markers(fig, full, trades)
     groups, _ = _trade_markers(trades, t_min, t_max, offset)
     long_entries, long_exits, short_entries, short_exits = groups
 
@@ -399,15 +428,17 @@ def price_figure(
     )
 
     fig.update_layout(
-        title="Price chart · signal bar + fills + exits",
-        height=640,
-        margin=dict(l=12, r=48, t=48, b=12),
+        title=f"Price chart · {len(full):,} bars loaded · showing {n_visible}",
+        autosize=True,
+        height=PRICE_CHART_HEIGHT,
+        margin=dict(l=4, r=56, t=40, b=16),
         xaxis_title="Time (ET)",
         yaxis_title="Price",
         template="plotly_dark",
         paper_bgcolor="#0e1015",
         plot_bgcolor="#131722",
         xaxis_rangeslider_visible=False,
+        uirevision="price-chart",
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -418,17 +449,32 @@ def price_figure(
             font=dict(size=11),
         ),
         hovermode="x unified",
-    )
-    fig.update_xaxes(
-        gridcolor="#2a2e39",
-        showgrid=True,
-        zeroline=False,
+        xaxis=dict(
+            range=_viewport_xrange(viewport, timeframe_minutes),
+            gridcolor="#2a2e39",
+            showgrid=True,
+            zeroline=False,
+            tickfont=dict(size=12),
+            fixedrange=False,
+        ),
     )
     fig.update_yaxes(
+        range=_viewport_yrange(viewport),
         gridcolor="#2a2e39",
         showgrid=True,
         zeroline=False,
         side="right",
+        tickfont=dict(size=12),
+        fixedrange=False,
+    )
+    # Fixed candle body width on the time axis (1m = 60_000 ms).
+    xperiod_ms = max(1, timeframe_minutes) * 60 * 1000
+    fig.update_traces(
+        selector=dict(type="candlestick"),
+        xperiod=xperiod_ms,
+        xperiodalignment="middle",
+        increasing_line_width=1.4,
+        decreasing_line_width=1.4,
     )
     return _apply_chart_interaction(fig)
 
