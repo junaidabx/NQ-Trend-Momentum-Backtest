@@ -24,6 +24,10 @@ PLOTLY_UI = {
 # Full-width price chart — responsive height via CSS + autosize.
 PRICE_CHART_UI = {**PLOTLY_UI, "responsive": True}
 PRICE_CHART_HEIGHT = 580
+# Bars actually drawn (pan within this window). Keeps chart light vs full history.
+CHART_MAX_RENDER_BARS = 480
+CHART_MIN_RENDER_BARS = 96
+CHART_RENDER_MULT = 16
 
 
 def _apply_chart_interaction(fig: go.Figure) -> go.Figure:
@@ -269,23 +273,25 @@ def _add_marker_trace(
     symbol: str,
     color: str,
     textposition: str,
+    show_labels: bool = False,
 ) -> None:
     if not points:
         return
+    mode = "markers+text" if show_labels else "markers"
     fig.add_trace(
         go.Scatter(
             x=[p["x"] for p in points],
             y=[p["y"] for p in points],
-            mode="markers+text",
+            mode=mode,
             name=name,
-            text=[p["text"] for p in points],
-            textposition=textposition,
+            text=[p["text"] for p in points] if show_labels else None,
+            textposition=textposition if show_labels else None,
             textfont=dict(size=10, color=color, family="Inter, Segoe UI, sans-serif"),
             marker=dict(
                 symbol=symbol,
-                size=13,
+                size=11,
                 color=color,
-                line=dict(width=1.2, color="#ffffff"),
+                line=dict(width=1, color="#ffffff"),
             ),
             hovertext=[p["hover"] for p in points],
             hoverinfo="text",
@@ -294,6 +300,7 @@ def _add_marker_trace(
 
 
 def _add_position_bands(fig: go.Figure, trades: list[Trade], t_min: datetime, t_max: datetime) -> None:
+    """Lightweight trade shading — shapes only (no extra line traces)."""
     for trade in trades:
         if trade.exit_time < t_min or trade.entry_time > t_max:
             continue
@@ -309,20 +316,6 @@ def _add_position_bands(fig: go.Figure, trades: list[Trade], t_min: datetime, t_
             fillcolor=fill,
             line=dict(width=0),
             layer="below",
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[trade.entry_time.astimezone(_ET), trade.exit_time.astimezone(_ET)],
-                y=[trade.entry_price, trade.exit_price],
-                mode="lines",
-                line=dict(
-                    color=_CLR_LONG_ENTRY if trade.side.value == "long" else _CLR_SHORT_ENTRY,
-                    width=1,
-                    dash="dot",
-                ),
-                showlegend=False,
-                hoverinfo="skip",
-            )
         )
 
 
@@ -346,36 +339,68 @@ def _viewport_yrange(viewport: pd.DataFrame) -> list[float]:
     return [y_lo - pad, y_hi + pad]
 
 
+def render_bar_count(visible_bars: int) -> int:
+    """How many candles to plot — enough to pan around, capped for performance."""
+    n_vis = max(5, int(visible_bars))
+    return min(CHART_MAX_RENDER_BARS, max(CHART_MIN_RENDER_BARS, n_vis * CHART_RENDER_MULT))
+
+
+def _chart_render_slice(
+    df: pd.DataFrame,
+    *,
+    visible_bars: int,
+    bars_from_end: int,
+) -> pd.DataFrame:
+    """Bars sent to Plotly (a rolling buffer ending at bars_from_end)."""
+    n = len(df)
+    if n == 0:
+        return df
+    count = render_bar_count(visible_bars)
+    end_idx = max(0, n - max(0, bars_from_end))
+    start_idx = max(0, end_idx - count)
+    return df.iloc[start_idx:end_idx]
+
+
+def _chart_viewport(render: pd.DataFrame, visible_bars: int) -> pd.DataFrame:
+    """Initial x-axis window — rightmost visible_bars inside the render buffer."""
+    if render.empty:
+        return render
+    n_vis = min(max(1, visible_bars), len(render))
+    return render.iloc[-n_vis:]
+
+
 def price_figure(
     df: pd.DataFrame,
     trades: list[Trade],
     *,
     visible_bars: int = 15,
+    bars_from_end: int = 0,
     timeframe_minutes: int = 1,
     show_signal_bars: bool = False,
+    show_trade_labels: bool = False,
 ) -> go.Figure:
     if df.empty:
         fig = go.Figure()
         fig.update_layout(title="Price + trades", height=640)
         return fig
 
-    full = df.copy()
-    n_visible = min(max(1, visible_bars), len(full))
-    # All bars are plotted; x-axis range sets the initial viewport only.
-    viewport = full.iloc[-n_visible:]
+    render = _chart_render_slice(df, visible_bars=visible_bars, bars_from_end=bars_from_end)
+    viewport = _chart_viewport(render, visible_bars)
+    n_visible = len(viewport)
+    n_render = len(render)
     offset = _price_offset(viewport)
-    t_min = full["time"].min()
-    t_max = full["time"].max()
+    t_min = render["time"].iloc[0].to_pydatetime()
+    t_max = render["time"].iloc[-1].to_pydatetime()
 
     fig = make_subplots(rows=1, cols=1)
 
     fig.add_trace(
         go.Candlestick(
-            x=full["time_et"],
-            open=full["open"],
-            high=full["high"],
-            low=full["low"],
-            close=full["close"],
+            x=render["time_et"],
+            open=render["open"],
+            high=render["high"],
+            low=render["low"],
+            close=render["close"],
             name="NQ",
             increasing_line_color="#26a69a",
             decreasing_line_color="#ef5350",
@@ -383,21 +408,21 @@ def price_figure(
             decreasing_fillcolor="#ef5350",
         )
     )
-    if "ema_fast" in full.columns:
+    if "ema_fast" in render.columns:
         fig.add_trace(
             go.Scatter(
-                x=full["time_et"],
-                y=full["ema_fast"],
+                x=render["time_et"],
+                y=render["ema_fast"],
                 mode="lines",
                 name="EMA fast",
                 line=dict(color="#ffb74d", width=1.6),
             )
         )
-    if "ema_slow" in full.columns:
+    if "ema_slow" in render.columns:
         fig.add_trace(
             go.Scatter(
-                x=full["time_et"],
-                y=full["ema_slow"],
+                x=render["time_et"],
+                y=render["ema_slow"],
                 mode="lines",
                 name="EMA slow",
                 line=dict(color="#42a5f5", width=1.6),
@@ -406,29 +431,30 @@ def price_figure(
 
     _add_position_bands(fig, trades, t_min, t_max)
     if show_signal_bars:
-        _add_signal_markers(fig, full, trades)
+        _add_signal_markers(fig, render, trades)
     groups, _ = _trade_markers(trades, t_min, t_max, offset)
     long_entries, long_exits, short_entries, short_exits = groups
 
     _add_marker_trace(
         fig, long_entries, name="Long fill", symbol="triangle-up",
-        color=_CLR_LONG_ENTRY, textposition="bottom center",
+        color=_CLR_LONG_ENTRY, textposition="bottom center", show_labels=show_trade_labels,
     )
     _add_marker_trace(
         fig, long_exits, name="Long exit", symbol="triangle-down",
-        color=_CLR_LONG_EXIT, textposition="top center",
+        color=_CLR_LONG_EXIT, textposition="top center", show_labels=show_trade_labels,
     )
     _add_marker_trace(
         fig, short_entries, name="Short fill", symbol="triangle-down",
-        color=_CLR_SHORT_ENTRY, textposition="top center",
+        color=_CLR_SHORT_ENTRY, textposition="top center", show_labels=show_trade_labels,
     )
     _add_marker_trace(
         fig, short_exits, name="Short exit", symbol="triangle-up",
-        color=_CLR_SHORT_EXIT, textposition="bottom center",
+        color=_CLR_SHORT_EXIT, textposition="bottom center", show_labels=show_trade_labels,
     )
 
+    total_bars = len(df)
     fig.update_layout(
-        title=f"Price chart · {len(full):,} bars loaded · showing {n_visible}",
+        title=f"Price chart · {n_visible} on screen · {n_render} loaded · {total_bars:,} in run",
         autosize=True,
         height=PRICE_CHART_HEIGHT,
         margin=dict(l=4, r=56, t=40, b=16),
@@ -438,7 +464,7 @@ def price_figure(
         paper_bgcolor="#0e1015",
         plot_bgcolor="#131722",
         xaxis_rangeslider_visible=False,
-        uirevision="price-chart",
+        uirevision=f"price-{bars_from_end}-{n_render}",
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -448,7 +474,7 @@ def price_figure(
             bgcolor="rgba(0,0,0,0)",
             font=dict(size=11),
         ),
-        hovermode="x unified",
+        hovermode="closest",
         xaxis=dict(
             range=_viewport_xrange(viewport, timeframe_minutes),
             gridcolor="#2a2e39",

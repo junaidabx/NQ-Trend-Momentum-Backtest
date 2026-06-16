@@ -27,6 +27,7 @@ from backtest_app.charts import (  # noqa: E402
     monthly_pnl_figure,
     price_figure,
     rejections_figure,
+    render_bar_count,
 )
 from backtest_app.config_ui import render_strategy_config  # noqa: E402
 from backtest_app.data_loader import (  # noqa: E402
@@ -169,6 +170,86 @@ def _history_file_tag(data_slice) -> str:
     return f"{s}_to_{e}"
 
 
+def _rerun_chart_panel() -> None:
+    try:
+        st.rerun(scope="fragment")
+    except TypeError:
+        st.rerun()
+
+
+_fragment = getattr(st, "fragment", lambda f: f)
+
+
+@_fragment
+def _render_price_chart(
+    df: pd.DataFrame,
+    trades,
+    *,
+    target_tf: int,
+    trade_start: time,
+    trade_end: time,
+) -> None:
+    """Isolated chart panel — reruns only when its controls change."""
+    if "chart_bars_from_end" not in st.session_state:
+        st.session_state.chart_bars_from_end = 0
+
+    c1, c2, c3 = st.columns([1.1, 1.2, 1.1])
+    with c1:
+        chart_visible_bars = st.number_input(
+            "Candles on screen",
+            min_value=5,
+            max_value=120,
+            value=15,
+            step=1,
+            key="chart_visible_bars",
+            help="Fewer = wider candles. Drag chart left/right to pan within loaded window.",
+        )
+    with c2:
+        max_back = max(0, len(df) - int(chart_visible_bars))
+        bars_from_end = int(st.session_state.chart_bars_from_end)
+        bars_from_end = max(0, min(bars_from_end, max_back))
+        st.session_state.chart_bars_from_end = bars_from_end
+        nav_step = max(int(chart_visible_bars), render_bar_count(int(chart_visible_bars)) // 3)
+        b_prev, b_next = st.columns(2)
+        with b_prev:
+            if st.button("◀ Older", width="stretch", help="Load earlier history"):
+                st.session_state.chart_bars_from_end = min(max_back, bars_from_end + nav_step)
+                _rerun_chart_panel()
+        with b_next:
+            if st.button("Newer ▶", width="stretch", help="Move toward latest bars"):
+                st.session_state.chart_bars_from_end = max(0, bars_from_end - nav_step)
+                _rerun_chart_panel()
+    with c3:
+        st.caption(
+            f"Loaded **{render_bar_count(int(chart_visible_bars))}** bars · "
+            f"offset **{bars_from_end}** from end"
+        )
+
+    fig = price_figure(
+        df,
+        trades,
+        visible_bars=int(chart_visible_bars),
+        bars_from_end=bars_from_end,
+        timeframe_minutes=target_tf,
+        show_signal_bars=False,
+        show_trade_labels=False,
+    )
+    st.markdown('<div class="price-chart-panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config=PRICE_CHART_UI,
+        key="price_chart",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.caption(
+        f"**{len(df):,}** bars in run · **{int(chart_visible_bars)}** on screen · "
+        f"**drag to pan** within loaded window · **◀ Older** for earlier history · "
+        f"{target_tf}m · {trade_start}–{trade_end} ET"
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="NQ Strategy Backtest",
@@ -264,6 +345,14 @@ def main() -> None:
             st.session_state["bt_trade_start"] = trade_start
             st.session_state["bt_trade_end"] = trade_end
             st.session_state["bt_target_tf"] = target_tf
+            chart_bars = data_slice.warmup_bars + data_slice.test_bars
+            st.session_state["bt_chart_df"] = add_indicators(
+                bars_to_df(chart_bars),
+                cfg.strategy.ema_fast,
+                cfg.strategy.ema_slow,
+            )
+            st.session_state["bt_chart_trades"] = trades_in_history_window(result, data_slice)
+            st.session_state.chart_bars_from_end = 0
         except Exception as exc:
             st.error(f"Backtest failed: {exc}")
             st.stop()
@@ -328,11 +417,15 @@ def main() -> None:
     render_performance_cards(result, starting_balance)
 
     st.markdown('<div class="results-nav">', unsafe_allow_html=True)
-    tab_overview, tab_chart, tab_trades, tab_rejects = st.tabs(
-        ["Overview", "Price chart", "Trades", "Rejections"]
+    results_view = st.radio(
+        "Results section",
+        ["Overview", "Price chart", "Trades", "Rejections"],
+        horizontal=True,
+        key="results_view",
+        label_visibility="collapsed",
     )
 
-    with tab_overview:
+    if results_view == "Overview":
         left, right = st.columns([1.15, 0.85])
         with left:
             st.plotly_chart(
@@ -345,45 +438,30 @@ def main() -> None:
             st.plotly_chart(monthly_pnl_figure(result.trades), width="stretch", config=PLOTLY_UI)
             render_side_breakdown(result)
 
-    with tab_chart:
-        chart_visible_bars = st.number_input(
-            "Candles on screen",
-            min_value=5,
-            max_value=120,
-            value=15,
-            step=1,
-            key="chart_visible_bars",
-            help="Fewer = wider, taller candles. All history stays loaded — drag left to scroll.",
-        )
-        chart_bars = data_slice.warmup_bars + data_slice.test_bars
-        df = bars_to_df(chart_bars)
-        df = add_indicators(df, cfg.strategy.ema_fast, cfg.strategy.ema_slow)
-        st.markdown('<div class="price-chart-panel">', unsafe_allow_html=True)
-        st.plotly_chart(
-            price_figure(
-                df,
-                trades_in_history_window(result, data_slice),
-                visible_bars=int(chart_visible_bars),
-                timeframe_minutes=target_tf,
-                show_signal_bars=False,
-            ),
-            width="stretch",
-            config=PRICE_CHART_UI,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.caption(
-            f"**{len(df):,}** bars loaded · **{int(chart_visible_bars)}** candles on screen · "
-            f"{target_tf}m · {trade_start}–{trade_end} ET · "
-            "Use **Candles on screen** to widen bars · drag left for older history"
+    elif results_view == "Price chart":
+        if "bt_chart_df" not in st.session_state:
+            chart_bars = data_slice.warmup_bars + data_slice.test_bars
+            st.session_state["bt_chart_df"] = add_indicators(
+                bars_to_df(chart_bars),
+                cfg.strategy.ema_fast,
+                cfg.strategy.ema_slow,
+            )
+            st.session_state["bt_chart_trades"] = trades_in_history_window(result, data_slice)
+        _render_price_chart(
+            st.session_state["bt_chart_df"],
+            st.session_state["bt_chart_trades"],
+            target_tf=target_tf,
+            trade_start=trade_start,
+            trade_end=trade_end,
         )
 
-    with tab_trades:
+    elif results_view == "Trades":
         if result.trades:
             st.dataframe(trades_dataframe(result, data_slice), width="stretch", hide_index=True)
         else:
             st.warning("No trades — widen trade window or adjust parameters.")
 
-    with tab_rejects:
+    elif results_view == "Rejections":
         st.markdown("**Strategy signal rejections** (chop, spike, near-close — logged by `strategy.py`)")
         st.plotly_chart(rejections_figure(result.rejections), width="stretch", config=PLOTLY_UI)
         if result.rejections:
