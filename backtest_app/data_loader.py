@@ -131,14 +131,13 @@ def resample_bars(bars: list[Bar], target_minutes: int) -> list[Bar]:
     return out
 
 
-def load_bars_from_csv(
-    source: FileSource,
-    target_timeframe_minutes: int = 5,
-    source_timeframe_minutes: Optional[int] = None,
+def _bars_from_frames(
+    frames: list[pd.DataFrame],
+    target_timeframe_minutes: int,
 ) -> tuple[list[Bar], int, int]:
-    """Parse CSV and optionally resample to the strategy timeframe."""
-    df = _read_csv(source)
-    src_tf = source_timeframe_minutes or _infer_source_minutes(df)
+    df = pd.concat(frames, ignore_index=True)
+    df = df.sort_values("time").drop_duplicates("time", keep="last")
+    src_tf = _infer_source_minutes(df)
     bars = _df_to_bars(df, src_tf)
     if target_timeframe_minutes != src_tf:
         bars = resample_bars(bars, target_timeframe_minutes)
@@ -153,13 +152,47 @@ def load_bars_from_paths(
     if not paths:
         raise ValueError("No CSV files selected")
     frames = [_read_csv(p) for p in paths]
-    df = pd.concat(frames, ignore_index=True)
-    df = df.sort_values("time").drop_duplicates("time", keep="last")
-    src_tf = _infer_source_minutes(df)
+    return _bars_from_frames(frames, target_timeframe_minutes)
+
+
+def load_bars_from_bytes_list(
+    files: list[tuple[str, bytes]],
+    target_timeframe_minutes: int = 5,
+) -> tuple[list[Bar], int, int]:
+    """Load uploaded CSV bytes; merge and sort by bar time (upload order ignored)."""
+    if not files:
+        raise ValueError("No CSV files uploaded")
+    frames = [_read_csv(io.BytesIO(data)) for _name, data in files]
+    return _bars_from_frames(frames, target_timeframe_minutes)
+
+
+def load_bars_from_csv(
+    source: FileSource,
+    target_timeframe_minutes: int = 5,
+    source_timeframe_minutes: Optional[int] = None,
+) -> tuple[list[Bar], int, int]:
+    """Parse CSV and optionally resample to the strategy timeframe."""
+    df = _read_csv(source)
+    src_tf = source_timeframe_minutes or _infer_source_minutes(df)
     bars = _df_to_bars(df, src_tf)
     if target_timeframe_minutes != src_tf:
         bars = resample_bars(bars, target_timeframe_minutes)
     return bars, src_tf, target_timeframe_minutes
+
+
+__all__ = [
+    "DataSlice",
+    "data_bounds",
+    "default_window_end_start",
+    "discover_csv_paths",
+    "earliest_test_start",
+    "load_bars_from_bytes_list",
+    "load_bars_from_csv",
+    "load_bars_from_paths",
+    "required_warmup_bars",
+    "resample_bars",
+    "slice_for_backtest",
+]
 
 
 def required_warmup_bars(

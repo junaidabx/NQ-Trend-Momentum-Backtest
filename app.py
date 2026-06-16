@@ -35,7 +35,6 @@ from backtest_app.data_loader import (  # noqa: E402
     default_window_end_start,
     discover_csv_paths,
     earliest_test_start,
-    load_bars_from_csv,
     load_bars_from_paths,
     required_warmup_bars,
     slice_for_backtest,
@@ -69,10 +68,20 @@ def _cached_bars_from_paths(paths_tuple: tuple[str, ...], target_tf: int):
 
 
 @st.cache_data(show_spinner="Loading uploaded CSV…")
-def _cached_bars_from_upload(file_bytes: bytes, filename: str, target_tf: int):
-    import io
+def _cached_bars_from_uploads(files_tuple: tuple[tuple[str, bytes], ...], target_tf: int):
+    """Load uploads via temp files — reuses load_bars_from_paths (Streamlit-safe)."""
+    import tempfile
 
-    return load_bars_from_csv(io.BytesIO(file_bytes), target_timeframe_minutes=target_tf)
+    with tempfile.TemporaryDirectory() as tmp:
+        paths: list[Path] = []
+        for i, (name, data) in enumerate(files_tuple):
+            safe = Path(name).name or f"upload_{i}.csv"
+            dest = Path(tmp) / safe
+            if dest.exists():
+                dest = Path(tmp) / f"{i}_{safe}"
+            dest.write_bytes(data)
+            paths.append(dest)
+        return load_bars_from_paths(paths, target_timeframe_minutes=target_tf)
 
 
 def _history_widget_key(data_key: str, field: str) -> str:
@@ -149,17 +158,17 @@ def _render_history_window(bars, min_warmup: int) -> tuple[object, object, str]:
     return start_utc, end_utc, f"{fmt_et(start_utc)} → {fmt_et(end_utc)}"
 
 
-def _render_data_source(bundled: list[Path]) -> tuple[list[Path], bytes | None, str, str]:
+def _render_data_source(bundled: list[Path]) -> tuple[list[Path], list[tuple[str, bytes]] | None, str]:
     c1, c2 = st.columns([1, 2])
     with c1:
         source_mode = st.radio(
             "Data source",
             ["Bundled CSV", "Upload CSV"],
-            help="TradingView export: time,open,high,low,close (Unix seconds). Upload your own CSV for 3–6 month history.",
+            help="TradingView export: time,open,high,low,close (Unix seconds). "
+            "Upload one or more CSVs — merged and sorted by bar time automatically.",
         )
     selected_paths: list[Path] = []
-    upload_bytes: bytes | None = None
-    upload_name = ""
+    uploads: list[tuple[str, bytes]] | None = None
     label = ""
 
     with c2:
@@ -176,14 +185,23 @@ def _render_data_source(bundled: list[Path]) -> tuple[list[Path], bytes | None, 
                 selected_paths = [next(p for p in bundled if p.name == pick)]
                 label = pick
         else:
-            uploaded = st.file_uploader("Upload TradingView CSV", type=["csv"])
-            if uploaded is None:
-                st.info("Upload a CSV to continue.")
+            uploaded = st.file_uploader(
+                "Upload TradingView CSV",
+                type=["csv"],
+                accept_multiple_files=True,
+                help="Select multiple files in any order — bars are merged and sorted by time.",
+            )
+            if not uploaded:
+                st.info("Upload one or more CSV files to continue.")
                 st.stop()
-            upload_bytes = uploaded.getvalue()
-            upload_name = uploaded.name
-            label = upload_name
-    return selected_paths, upload_bytes, upload_name, label
+            files = uploaded if isinstance(uploaded, list) else [uploaded]
+            uploads = [(f.name, f.getvalue()) for f in files]
+            if len(uploads) == 1:
+                label = uploads[0][0]
+            else:
+                label = f"{len(uploads)} uploaded CSV files (merged by time)"
+            st.caption("Files: " + ", ".join(name for name, _ in uploads))
+    return selected_paths, uploads, label
 
 
 def _history_file_tag(data_slice) -> str:
@@ -287,7 +305,7 @@ def main() -> None:
     # ── Configuration (top) ─────────────────────────────────────────
     with st.container(border=True):
         st.subheader("Data")
-        selected_paths, upload_bytes, upload_name, data_label = _render_data_source(bundled)
+        selected_paths, uploads, data_label = _render_data_source(bundled)
 
     with st.container(border=True):
         st.subheader("Strategy & session")
@@ -306,8 +324,8 @@ def main() -> None:
     trade_end = m.extended_window.end_et if m.extended_hours else m.trading_window.end_et
 
     try:
-        if upload_bytes is not None:
-            bars, src_tf, tgt_tf = _cached_bars_from_upload(upload_bytes, upload_name, target_tf)
+        if uploads is not None:
+            bars, src_tf, tgt_tf = _cached_bars_from_uploads(tuple(uploads), target_tf)
         else:
             bars, src_tf, tgt_tf = _cached_bars_from_paths(
                 tuple(str(p) for p in selected_paths), target_tf
