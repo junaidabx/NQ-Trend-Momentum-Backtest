@@ -257,7 +257,7 @@ def _render_price_chart(
             "Candles on screen",
             min_value=5,
             max_value=120,
-            value=15,
+            value=75,
             step=1,
             key="chart_visible_bars",
             help="Fewer = wider candles. Drag chart left/right to pan within loaded window.",

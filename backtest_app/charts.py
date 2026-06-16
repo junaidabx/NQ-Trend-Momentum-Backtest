@@ -529,7 +529,7 @@ def _add_signal_markers(
             x=[p["x"] for p in signals],
             y=[p["y"] for p in signals],
             mode="markers",
-            name="Signal bar (body/ATR)",
+            name="Signal bar",
             marker=dict(
                 symbol="diamond-open",
                 size=11,
@@ -743,10 +743,15 @@ def price_figure(
 
     total_bars = len(df)
     fig.update_layout(
-        title=f"Price chart · {n_visible} on screen · {n_render} loaded · {total_bars:,} in run",
+        title=dict(
+            text=f"Price chart · {n_visible} on screen · {n_render} loaded · {total_bars:,} in run",
+            x=0,
+            xanchor="left",
+            pad=dict(t=6, b=10),
+        ),
         autosize=True,
         height=PRICE_CHART_HEIGHT,
-        margin=dict(l=4, r=56, t=40, b=16),
+        margin=dict(l=4, r=56, t=48, b=72),
         xaxis_title="Time (ET)",
         yaxis_title="Price",
         template="plotly_dark",
@@ -756,12 +761,12 @@ def price_figure(
         uirevision=f"price-{bars_from_end}-{n_render}",
         legend=dict(
             orientation="h",
-            yanchor="bottom",
-            y=1.01,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(0,0,0,0)",
-            font=dict(size=11),
+            yanchor="top",
+            y=-0.24,
+            xanchor="center",
+            x=0.5,
+            bgcolor="rgba(14,16,21,0.55)",
+            font=dict(size=10),
         ),
         hovermode="closest",
         xaxis=dict(
