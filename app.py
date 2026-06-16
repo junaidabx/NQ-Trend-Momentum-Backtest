@@ -76,7 +76,102 @@ def _cached_bars_from_upload(file_bytes: bytes, filename: str, target_tf: int):
 
 
 def _time_input(label: str, default: time, key: str) -> time:
-    return st.time_input(label, value=default, step=timedelta(minutes=1), key=key)
+    """Stable time widget — avoids mobile re-render loops from changing ``value``."""
+    if key not in st.session_state:
+        st.session_state[key] = default.replace(second=0, microsecond=0)
+    return st.time_input(label, step=timedelta(minutes=1), key=key)
+
+
+def _init_history_widget_defaults(
+    *,
+    data_key: str,
+    start_date,
+    end_date,
+    start_time: time,
+    end_time: time,
+) -> None:
+    if st.session_state.get("hist_data_key") == data_key:
+        return
+    st.session_state.hist_data_key = data_key
+    st.session_state.hist_sd = start_date
+    st.session_state.hist_ed = end_date
+    st.session_state.hist_st = start_time
+    st.session_state.hist_et = end_time
+
+
+def _render_history_window(bars, min_warmup: int) -> tuple[object, object, str]:
+    first_utc, last_utc = data_bounds(bars)
+    default_end, default_start = default_window_end_start(bars, months=3)
+    def_start_et = utc_to_et(default_start)
+    def_end_et = utc_to_et(default_end)
+    earliest_utc = earliest_test_start(bars, min_warmup)
+
+    first_date = utc_to_et(first_utc).date()
+    last_date = utc_to_et(last_utc).date()
+    earliest_date = utc_to_et(earliest_utc).date()
+    def_start_date = def_start_et.date()
+    def_end_date = def_end_et.date()
+    def_start_time = def_start_et.time().replace(second=0, microsecond=0)
+    def_end_time = def_end_et.time().replace(second=0, microsecond=0)
+
+    data_key = f"{first_utc.isoformat()}|{last_utc.isoformat()}|{min_warmup}"
+    _init_history_widget_defaults(
+        data_key=data_key,
+        start_date=def_start_date,
+        end_date=def_end_date,
+        start_time=def_start_time,
+        end_time=def_end_time,
+    )
+
+    st.markdown(
+        f"**Available data (ET):** {fmt_et(first_utc)} → {fmt_et(last_utc)} · "
+        f"**Earliest test start:** {fmt_et(earliest_utc)} ({min_warmup} warmup bars)"
+    )
+    st.caption(
+        "CSV `time` column is **Unix UTC** (TradingView export). "
+        f"Example: first bar stored as UTC **{first_utc.strftime('%Y-%m-%d %H:%M')}** → "
+        f"**{fmt_et(first_utc)} ET**. Session windows and trade times use **America/New_York**. "
+        "Default range = **3 calendar months** ending at the latest bar."
+    )
+
+    st.markdown("**History start**")
+    c1, c2 = st.columns(2)
+    with c1:
+        sd = st.date_input(
+            "Start date",
+            min_value=first_date,
+            max_value=last_date,
+            key="hist_sd",
+        )
+    with c2:
+        st_ = _time_input("Start time (ET)", def_start_time, "hist_st")
+
+    st.markdown("**History end**")
+    c3, c4 = st.columns(2)
+    with c3:
+        ed = st.date_input(
+            "End date",
+            min_value=first_date,
+            max_value=last_date,
+            key="hist_ed",
+        )
+    with c4:
+        et_ = _time_input("End time (ET)", def_end_time, "hist_et")
+
+    if sd > ed:
+        st.error("History start date must be on or before end date.")
+    if sd < earliest_date:
+        st.warning(f"Warmup required — earliest test start **{fmt_et(earliest_utc)}**")
+
+    start_utc = et_to_utc(sd, st_)
+    end_utc = et_to_utc(ed, et_)
+    if end_utc > last_utc:
+        end_utc = last_utc
+        if ed == last_date:
+            st.caption(f"End time capped at latest bar: **{fmt_et(last_utc)}**")
+    if start_utc >= end_utc:
+        st.error("History start must be before end.")
+    return start_utc, end_utc, f"{fmt_et(start_utc)} → {fmt_et(end_utc)}"
 
 
 def _render_data_source(bundled: list[Path]) -> tuple[list[Path], bytes | None, str, str]:
@@ -114,54 +209,6 @@ def _render_data_source(bundled: list[Path]) -> tuple[list[Path], bytes | None, 
             upload_name = uploaded.name
             label = upload_name
     return selected_paths, upload_bytes, upload_name, label
-
-
-def _render_history_window(bars, min_warmup: int) -> tuple[object, object, str]:
-    first_utc, last_utc = data_bounds(bars)
-    default_end, default_start = default_window_end_start(bars, months=3)
-    def_start_et = utc_to_et(default_start)
-    def_end_et = utc_to_et(default_end)
-    earliest_utc = earliest_test_start(bars, min_warmup)
-
-    st.markdown(
-        f"**Available data (ET):** {fmt_et(first_utc)} → {fmt_et(last_utc)} · "
-        f"**Earliest test start:** {fmt_et(earliest_utc)} ({min_warmup} warmup bars)"
-    )
-    st.caption(
-        "CSV `time` column is **Unix UTC** (TradingView export). "
-        f"Example: first bar stored as UTC **{first_utc.strftime('%Y-%m-%d %H:%M')}** → "
-        f"**{fmt_et(first_utc)} ET**. Session windows and trade times use **America/New_York**."
-    )
-
-    use_defaults = st.checkbox(
-        "Default history: 3 calendar months ending at latest bar",
-        value=True,
-        help="History window = which dates to replay. Separate from intraday trade window above.",
-    )
-
-    if use_defaults:
-        st.caption(
-            f"Start **{def_start_et.strftime('%Y-%m-%d %H:%M')} ET** · "
-            f"End **{def_end_et.strftime('%Y-%m-%d %H:%M')} ET**"
-        )
-        return default_start, default_end, "Default (3 months to latest bar)"
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        sd = st.date_input("History start date", def_start_et.date(), key="hist_sd")
-    with c2:
-        st_ = _time_input("Start time (ET)", def_start_et.time().replace(second=0), "hist_st")
-    with c3:
-        ed = st.date_input("History end date", def_end_et.date(), key="hist_ed")
-    with c4:
-        et_ = _time_input("End time (ET)", def_end_et.time().replace(second=0), "hist_et")
-    start_utc = et_to_utc(sd, st_)
-    end_utc = et_to_utc(ed, et_)
-    if start_utc < earliest_utc:
-        st.warning(f"Warmup required — earliest start {fmt_et(earliest_utc)}")
-    if start_utc >= end_utc:
-        st.error("History start must be before end.")
-    return start_utc, end_utc, f"Custom {fmt_et(start_utc)} → {fmt_et(end_utc)}"
 
 
 def _history_file_tag(data_slice) -> str:
@@ -210,15 +257,12 @@ def _render_price_chart(
         bars_from_end = max(0, min(bars_from_end, max_back))
         st.session_state.chart_bars_from_end = bars_from_end
         nav_step = max(int(chart_visible_bars), render_bar_count(int(chart_visible_bars)) // 3)
-        b_prev, b_next = st.columns(2)
-        with b_prev:
-            if st.button("◀ Older", width="stretch", help="Load earlier history"):
-                st.session_state.chart_bars_from_end = min(max_back, bars_from_end + nav_step)
-                _rerun_chart_panel()
-        with b_next:
-            if st.button("Newer ▶", width="stretch", help="Move toward latest bars"):
-                st.session_state.chart_bars_from_end = max(0, bars_from_end - nav_step)
-                _rerun_chart_panel()
+        if st.button("◀ Older history", help="Load earlier candles beyond current pan window"):
+            st.session_state.chart_bars_from_end = min(max_back, bars_from_end + nav_step)
+            _rerun_chart_panel()
+        if st.button("Newer ▶", help="Move toward latest bars"):
+            st.session_state.chart_bars_from_end = max(0, bars_from_end - nav_step)
+            _rerun_chart_panel()
     with c3:
         st.caption(
             f"Loaded **{render_bar_count(int(chart_visible_bars))}** bars · "
@@ -237,7 +281,7 @@ def _render_price_chart(
     st.markdown('<div class="price-chart-panel">', unsafe_allow_html=True)
     st.plotly_chart(
         fig,
-        width="stretch",
+        use_container_width=True,
         config=PRICE_CHART_UI,
         key="price_chart",
     )
@@ -417,12 +461,10 @@ def main() -> None:
     render_performance_cards(result, starting_balance)
 
     st.markdown('<div class="results-nav">', unsafe_allow_html=True)
-    results_view = st.radio(
-        "Results section",
+    results_view = st.selectbox(
+        "Results view",
         ["Overview", "Price chart", "Trades", "Rejections"],
-        horizontal=True,
         key="results_view",
-        label_visibility="collapsed",
     )
 
     if results_view == "Overview":
@@ -430,12 +472,12 @@ def main() -> None:
         with left:
             st.plotly_chart(
                 equity_figure(result.equity_curve, starting_balance),
-                width="stretch",
+                use_container_width=True,
                 config=PLOTLY_UI,
             )
-            st.plotly_chart(drawdown_figure(result.equity_curve), width="stretch", config=PLOTLY_UI)
+            st.plotly_chart(drawdown_figure(result.equity_curve), use_container_width=True, config=PLOTLY_UI)
         with right:
-            st.plotly_chart(monthly_pnl_figure(result.trades), width="stretch", config=PLOTLY_UI)
+            st.plotly_chart(monthly_pnl_figure(result.trades), use_container_width=True, config=PLOTLY_UI)
             render_side_breakdown(result)
 
     elif results_view == "Price chart":
@@ -457,24 +499,28 @@ def main() -> None:
 
     elif results_view == "Trades":
         if result.trades:
-            st.dataframe(trades_dataframe(result, data_slice), width="stretch", hide_index=True)
+            st.dataframe(
+                trades_dataframe(result, data_slice),
+                use_container_width=True,
+                hide_index=True,
+            )
         else:
             st.warning("No trades — widen trade window or adjust parameters.")
 
     elif results_view == "Rejections":
         st.markdown("**Strategy signal rejections** (chop, spike, near-close — logged by `strategy.py`)")
-        st.plotly_chart(rejections_figure(result.rejections), width="stretch", config=PLOTLY_UI)
+        st.plotly_chart(rejections_figure(result.rejections), use_container_width=True, config=PLOTLY_UI)
         if result.rejections:
             st.dataframe(
                 pd.DataFrame([{"Reason": k, "Count": v} for k, v in sorted(result.rejections.items())]),
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
             )
         if result.entry_blocks:
             st.markdown("**Entry blocks** (risk / session — signal fired but entry not taken)")
             st.dataframe(
                 pd.DataFrame([{"Reason": k, "Count": v} for k, v in sorted(result.entry_blocks.items(), key=lambda x: -x[1])]),
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
             )
     st.markdown("</div>", unsafe_allow_html=True)

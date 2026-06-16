@@ -106,15 +106,16 @@ _CARD_CSS = """
         color: #bfdbfe !important;
         border-bottom-color: #60a5fa !important;
     }
-    .results-nav [data-testid="stRadio"] > div {
+    .results-nav [data-testid="stSelectbox"] > div > div {
         background: linear-gradient(180deg, rgba(96, 165, 250, 0.16) 0%, rgba(96, 165, 250, 0.03) 100%);
         border: 1px solid rgba(96, 165, 250, 0.35);
         border-radius: 10px;
-        padding: 0.35rem 0.5rem;
-        gap: 0.25rem;
     }
-    .results-nav [data-testid="stRadio"] label {
-        font-weight: 600 !important;
+    @media (max-width: 768px) {
+        .block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
+        .results-nav [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+        }
     }
     .stTabs [data-baseweb="tab-panel"] {
         padding-top: 0.85rem !important;
