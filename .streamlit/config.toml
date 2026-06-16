@@ -10,6 +10,9 @@ font = "sans serif"
 headless = true
 enableCORS = false
 enableXsrfProtection = true
+# Avoid Streamlit deleting local modules from sys.modules during deploy/reload
+# (prevents KeyError: 'backtest_app.*' on Streamlit Cloud).
+fileWatcherType = "none"
 
 [browser]
 gatherUsageStats = false

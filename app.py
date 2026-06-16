@@ -5,13 +5,17 @@ import sys
 from datetime import time, timedelta
 from pathlib import Path
 
+# Path setup must run before local package imports (Streamlit Cloud + reload safety).
+ROOT = Path(__file__).resolve().parent
+_root = str(ROOT)
+_engine = str(ROOT / "engine")
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+if _engine not in sys.path:
+    sys.path.insert(0, _engine)
+
 import pandas as pd
 import streamlit as st
-
-ROOT = Path(__file__).resolve().parent
-ENGINE_SRC = ROOT / "engine"
-if str(ENGINE_SRC) not in sys.path:
-    sys.path.insert(0, str(ENGINE_SRC))
 
 from backtest_app.charts import (  # noqa: E402
     PLOTLY_UI,
