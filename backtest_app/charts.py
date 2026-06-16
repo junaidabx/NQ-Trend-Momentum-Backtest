@@ -1,6 +1,7 @@
 """Chart helpers for the Streamlit backtest dashboard."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from core.state import Trade
+from core.state import Side, Trade
 
 _ET = ZoneInfo("America/New_York")
 
@@ -64,10 +65,243 @@ def bars_to_df(bars) -> pd.DataFrame:
     return df
 
 
-def add_indicators(df: pd.DataFrame, ema_fast: int, ema_slow: int) -> pd.DataFrame:
+def add_indicators(
+    df: pd.DataFrame,
+    ema_fast: int,
+    ema_slow: int,
+    atr_period: int = 14,
+) -> pd.DataFrame:
     out = df.copy()
     out["ema_fast"] = out["close"].ewm(span=ema_fast, adjust=False).mean()
     out["ema_slow"] = out["close"].ewm(span=ema_slow, adjust=False).mean()
+    out["ema_delta"] = out["ema_fast"] - out["ema_slow"]
+    out["bar_range"] = out["high"] - out["low"]
+    out["body"] = (out["close"] - out["open"]).abs()
+    out["body_ratio"] = out["body"] / out["bar_range"].where(out["bar_range"] > 0, pd.NA)
+    out["atr"] = _wilder_atr(out, atr_period)
+    out["range_atr"] = out["bar_range"] / out["atr"].where(out["atr"] > 0, pd.NA)
+    return out
+
+
+def _wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
+    """Wilder ATR — matches engine/core/indicators.ATR."""
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = pd.Series(index=df.index, dtype=float)
+    if len(df) < period:
+        return atr
+    seed = tr.iloc[:period].mean()
+    atr.iloc[period - 1] = seed
+    value = seed
+    for i in range(period, len(df)):
+        value = (value * (period - 1) + tr.iloc[i]) / period
+        atr.iloc[i] = value
+    return atr
+
+
+@dataclass(frozen=True)
+class ChartDiagnostics:
+    """Strategy thresholds for signal-bar validation on the chart."""
+
+    atr_period: int = 14
+    strong_candle_body_ratio: float = 0.5
+    strong_candle_atr_mult: float = 0.8
+    spike_atr_mult: float = 2.0
+    chop_ema_atr_mult: float = 0.25
+    entry_on_momentum_candle: bool = True
+    entry_on_prev_break: bool = True
+
+
+def _entry_bar_index(df: pd.DataFrame, entry_time: datetime) -> int | None:
+    if df.empty:
+        return None
+    times = df["time"]
+    match = df.index[times == entry_time].tolist()
+    if match:
+        return int(match[0])
+    idx = int(times.searchsorted(entry_time, side="left"))
+    if idx >= len(df):
+        idx = len(df) - 1
+    return idx
+
+
+def _signal_bar_index(df: pd.DataFrame, entry_time: datetime) -> int | None:
+    """Signal bar = bar before next-open fill (strategy trigger candle)."""
+    idx = _entry_bar_index(df, entry_time)
+    if idx is None or idx <= 0:
+        return None
+    return idx - 1
+
+
+def _is_strong_candle(row: pd.Series, atr: float, side: Side, diag: ChartDiagnostics) -> bool:
+    rng = float(row["bar_range"])
+    if rng <= 0 or atr <= 0:
+        return False
+    body_ratio = float(row["body_ratio"]) if pd.notna(row["body_ratio"]) else 0.0
+    if body_ratio < diag.strong_candle_body_ratio:
+        return False
+    if rng < diag.strong_candle_atr_mult * atr:
+        return False
+    bullish = float(row["close"]) > float(row["open"])
+    return bullish if side is Side.LONG else not bullish
+
+
+def _is_prev_break(row: pd.Series, prev: pd.Series, side: Side) -> bool:
+    if side is Side.LONG:
+        return float(row["high"]) > float(prev["high"]) and float(row["close"]) > float(prev["close"])
+    return float(row["low"]) < float(prev["low"]) and float(row["close"]) < float(prev["close"])
+
+
+def _infer_trigger(row: pd.Series, prev: pd.Series | None, side: Side, diag: ChartDiagnostics) -> str:
+    atr = float(row["atr"]) if pd.notna(row["atr"]) else 0.0
+    if diag.entry_on_momentum_candle and _is_strong_candle(row, atr, side, diag):
+        return "momentum candle"
+    if diag.entry_on_prev_break and prev is not None and _is_prev_break(row, prev, side):
+        return "prev-high break" if side is Side.LONG else "prev-low break"
+    return "unknown"
+
+
+def _analyze_signal_bar(
+    df: pd.DataFrame,
+    trade: Trade,
+    diag: ChartDiagnostics,
+) -> dict | None:
+    sig_idx = _signal_bar_index(df, trade.entry_time)
+    if sig_idx is None:
+        return None
+    row = df.iloc[sig_idx]
+    prev = df.iloc[sig_idx - 1] if sig_idx > 0 else None
+    atr = float(row["atr"]) if pd.notna(row["atr"]) else 0.0
+    rng = float(row["bar_range"])
+    body_ratio = float(row["body_ratio"]) if pd.notna(row["body_ratio"]) else 0.0
+    range_atr = float(row["range_atr"]) if pd.notna(row["range_atr"]) else 0.0
+    ema_delta = float(row["ema_delta"]) if pd.notna(row["ema_delta"]) else 0.0
+    side = trade.side
+
+    body_ok = body_ratio >= diag.strong_candle_body_ratio if rng > 0 else False
+    range_ok = rng >= diag.strong_candle_atr_mult * atr if atr > 0 else False
+    spike = rng > diag.spike_atr_mult * atr if atr > 0 else False
+    prev_spike = False
+    if prev is not None and atr > 0:
+        prev_rng = float(prev["high"]) - float(prev["low"])
+        prev_spike = prev_rng > diag.spike_atr_mult * atr
+    chop = abs(ema_delta) < diag.chop_ema_atr_mult * atr if atr > 0 else False
+    trigger = _infer_trigger(row, prev, side, diag)
+    momentum_ok = _is_strong_candle(row, atr, side, diag)
+    break_ok = prev is not None and _is_prev_break(row, prev, side)
+
+    return {
+        "sig_idx": sig_idx,
+        "time_et": row["time_et"],
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "body": float(row["body"]),
+        "bar_range": rng,
+        "body_ratio": body_ratio,
+        "atr": atr,
+        "range_atr": range_atr,
+        "ema_delta": ema_delta,
+        "trigger": trigger,
+        "body_ok": body_ok,
+        "range_ok": range_ok,
+        "momentum_ok": momentum_ok,
+        "break_ok": break_ok,
+        "spike": spike,
+        "prev_spike": prev_spike,
+        "chop": chop,
+        "valid": trigger != "unknown" and not spike and not prev_spike and not chop,
+    }
+
+
+def _signal_hover_html(info: dict, trade: Trade, diag: ChartDiagnostics) -> str:
+    side = trade.side.value.upper()
+    body_pct = info["body_ratio"] * 100
+    lines = [
+        f"<b>Signal bar ({side})</b> · {info['trigger']}",
+        f"O/H/L/C: {info['open']:.2f} / {info['high']:.2f} / {info['low']:.2f} / {info['close']:.2f}",
+        f"Body: {info['body']:.2f} · Range: {info['bar_range']:.2f}",
+        f"Body/Range: {body_pct:.0f}% (need ≥ {diag.strong_candle_body_ratio * 100:.0f}%)",
+        f"ATR({diag.atr_period}): {info['atr']:.2f}",
+        f"Range/ATR: {info['range_atr']:.2f} (need ≥ {diag.strong_candle_atr_mult:.2f})",
+        f"EMAΔ: {info['ema_delta']:+.2f} (chop if |Δ| < {diag.chop_ema_atr_mult:.2f}×ATR)",
+        f"Momentum OK: {'✓' if info['momentum_ok'] else '✗'} · Break OK: {'✓' if info['break_ok'] else '✗'}",
+        f"Spike bar: {'✗' if info['spike'] else '✓'} · Spike prev: {'✗' if info['prev_spike'] else '✓'} · Chop: {'✗' if info['chop'] else '✓'}",
+        f"Fill next bar @ {trade.entry_price:.2f}",
+    ]
+    return "<br>".join(lines)
+
+
+def signal_diagnostics_dataframe(
+    df: pd.DataFrame,
+    trades: list[Trade],
+    diag: ChartDiagnostics,
+) -> pd.DataFrame:
+    rows = []
+    for trade in trades:
+        info = _analyze_signal_bar(df, trade, diag)
+        if info is None:
+            continue
+        rows.append(
+            {
+                "entry_et": trade.entry_time.astimezone(_ET).strftime("%Y-%m-%d %H:%M"),
+                "side": trade.side.value.upper(),
+                "trigger": info["trigger"],
+                "body_pct": round(info["body_ratio"] * 100, 1),
+                "body_min_pct": round(diag.strong_candle_body_ratio * 100, 1),
+                "range": round(info["bar_range"], 2),
+                "atr": round(info["atr"], 2),
+                "range_atr": round(info["range_atr"], 2),
+                "range_min_atr": diag.strong_candle_atr_mult,
+                "momentum_ok": info["momentum_ok"],
+                "break_ok": info["break_ok"],
+                "spike": info["spike"],
+                "prev_spike": info["prev_spike"],
+                "chop": info["chop"],
+                "checks_ok": info["valid"],
+                "pnl": round(trade.pnl_currency, 2),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def chart_diagnostics_from_strategy(strategy) -> ChartDiagnostics:
+    """Build chart thresholds from a StrategyConfig-like object."""
+    return ChartDiagnostics(
+        atr_period=strategy.atr_period,
+        strong_candle_body_ratio=strategy.strong_candle_body_ratio,
+        strong_candle_atr_mult=strategy.strong_candle_atr_mult,
+        spike_atr_mult=strategy.spike_atr_mult,
+        chop_ema_atr_mult=strategy.chop_ema_atr_mult,
+        entry_on_momentum_candle=strategy.entry_on_momentum_candle,
+        entry_on_prev_break=strategy.entry_on_prev_break,
+    )
+
+
+def trades_with_signal_in_window(
+    df: pd.DataFrame,
+    trades: list[Trade],
+    diag: ChartDiagnostics,
+    t_min: datetime,
+    t_max: datetime,
+) -> list[Trade]:
+    """Trades whose signal bar falls inside [t_min, t_max]."""
+    out: list[Trade] = []
+    for trade in trades:
+        info = _analyze_signal_bar(df, trade, diag)
+        if info is None:
+            continue
+        sig_time = df.iloc[info["sig_idx"]]["time"].to_pydatetime()
+        if t_min <= sig_time <= t_max:
+            out.append(trade)
     return out
 
 
@@ -225,29 +459,67 @@ def _trade_markers(
     )
 
 
-def _add_signal_markers(fig: go.Figure, view: pd.DataFrame, trades: list[Trade]) -> None:
+def _add_signal_body_highlights(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    trades: list[Trade],
+    diag: ChartDiagnostics,
+    t_min: datetime,
+    t_max: datetime,
+    timeframe_minutes: int,
+) -> None:
+    """Highlight signal-candle bodies so body vs range is visible."""
+    pad = pd.Timedelta(minutes=max(1, timeframe_minutes) * 0.42)
+    for trade in trades:
+        info = _analyze_signal_bar(df, trade, diag)
+        if info is None:
+            continue
+        row = df.iloc[info["sig_idx"]]
+        sig_time = row["time"].to_pydatetime()
+        if sig_time < t_min or sig_time > t_max:
+            continue
+        y0 = min(float(row["open"]), float(row["close"]))
+        y1 = max(float(row["open"]), float(row["close"]))
+        fill = "rgba(251,191,36,0.38)" if info["valid"] else "rgba(229,72,77,0.32)"
+        fig.add_shape(
+            type="rect",
+            x0=row["time_et"] - pad,
+            x1=row["time_et"] + pad,
+            y0=y0,
+            y1=y1,
+            fillcolor=fill,
+            line=dict(width=1, color=_CLR_SIGNAL if info["valid"] else "#e5484d"),
+            layer="above",
+        )
+
+
+def _add_signal_markers(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    trades: list[Trade],
+    diag: ChartDiagnostics,
+    t_min: datetime,
+    t_max: datetime,
+    offset: float,
+) -> None:
     """Mark the signal bar (strategy trigger candle) — one bar before the fill."""
-    if view.empty or not trades:
+    if df.empty or not trades:
         return
-    times = view["time"].tolist()
     signals: list[dict] = []
     for trade in trades:
-        try:
-            idx = times.index(trade.entry_time)
-        except ValueError:
+        info = _analyze_signal_bar(df, trade, diag)
+        if info is None:
             continue
-        if idx <= 0:
+        row = df.iloc[info["sig_idx"]]
+        sig_time = row["time"].to_pydatetime()
+        if sig_time < t_min or sig_time > t_max:
             continue
-        row = view.iloc[idx - 1]
-        side = trade.side.value.upper()
+        y = float(row["high"]) + offset if trade.side is Side.LONG else float(row["low"]) - offset
         signals.append(
             {
                 "x": row["time_et"],
-                "y": row["close"],
-                "hover": (
-                    f"Signal bar ({side})<br>Strategy trigger · bar close {row['close']:.2f}<br>"
-                    f"Fill on next bar open @ {trade.entry_price:.2f}"
-                ),
+                "y": y,
+                "hover": _signal_hover_html(info, trade, diag),
             }
         )
     if not signals:
@@ -257,8 +529,13 @@ def _add_signal_markers(fig: go.Figure, view: pd.DataFrame, trades: list[Trade])
             x=[p["x"] for p in signals],
             y=[p["y"] for p in signals],
             mode="markers",
-            name="Signal bar (strategy)",
-            marker=dict(symbol="diamond-open", size=9, color=_CLR_SIGNAL, line=dict(width=1.5, color=_CLR_SIGNAL)),
+            name="Signal bar (body/ATR)",
+            marker=dict(
+                symbol="diamond-open",
+                size=11,
+                color=_CLR_SIGNAL,
+                line=dict(width=1.8, color=_CLR_SIGNAL),
+            ),
             hovertext=[p["hover"] for p in signals],
             hoverinfo="text",
         )
@@ -361,6 +638,16 @@ def _chart_render_slice(
     return df.iloc[start_idx:end_idx]
 
 
+def chart_render_window(
+    df: pd.DataFrame,
+    *,
+    visible_bars: int,
+    bars_from_end: int,
+) -> pd.DataFrame:
+    """Public wrapper for the rolling chart buffer slice."""
+    return _chart_render_slice(df, visible_bars=visible_bars, bars_from_end=bars_from_end)
+
+
 def _chart_viewport(render: pd.DataFrame, visible_bars: int) -> pd.DataFrame:
     """Initial x-axis window — rightmost visible_bars inside the render buffer."""
     if render.empty:
@@ -376,7 +663,8 @@ def price_figure(
     visible_bars: int = 15,
     bars_from_end: int = 0,
     timeframe_minutes: int = 1,
-    show_signal_bars: bool = False,
+    show_signal_diagnostics: bool = True,
+    diag: ChartDiagnostics | None = None,
     show_trade_labels: bool = False,
 ) -> go.Figure:
     if df.empty:
@@ -384,7 +672,7 @@ def price_figure(
         fig.update_layout(title="Price + trades", height=640)
         return fig
 
-    render = _chart_render_slice(df, visible_bars=visible_bars, bars_from_end=bars_from_end)
+    render = chart_render_window(df, visible_bars=visible_bars, bars_from_end=bars_from_end)
     viewport = _chart_viewport(render, visible_bars)
     n_visible = len(viewport)
     n_render = len(render)
@@ -430,8 +718,9 @@ def price_figure(
         )
 
     _add_position_bands(fig, trades, t_min, t_max)
-    if show_signal_bars:
-        _add_signal_markers(fig, render, trades)
+    if show_signal_diagnostics and diag is not None:
+        _add_signal_body_highlights(fig, df, trades, diag, t_min, t_max, timeframe_minutes)
+        _add_signal_markers(fig, df, trades, diag, t_min, t_max, offset)
     groups, _ = _trade_markers(trades, t_min, t_max, offset)
     long_entries, long_exits, short_entries, short_exits = groups
 

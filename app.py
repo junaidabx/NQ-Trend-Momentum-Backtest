@@ -20,6 +20,7 @@ import streamlit as st
 from backtest_app.charts import (  # noqa: E402
     PLOTLY_UI,
     PRICE_CHART_UI,
+    ChartDiagnostics,
     add_indicators,
     bars_to_df,
     drawdown_figure,
@@ -28,6 +29,9 @@ from backtest_app.charts import (  # noqa: E402
     price_figure,
     rejections_figure,
     render_bar_count,
+    signal_diagnostics_dataframe,
+    trades_with_signal_in_window,
+    chart_render_window,
 )
 from backtest_app.config_ui import render_strategy_config  # noqa: E402
 from backtest_app.data_loader import (  # noqa: E402
@@ -55,6 +59,19 @@ from infra.config import AppConfig  # noqa: E402
 
 DATA_DIRS = [ROOT / "data", ROOT / "NQ Data"]
 DEFAULT_STARTING_BALANCE = 50_000.0
+
+
+def _chart_diag_from_strategy(strategy) -> ChartDiagnostics:
+    """Build chart signal thresholds from strategy config (kept in app for import stability)."""
+    return ChartDiagnostics(
+        atr_period=strategy.atr_period,
+        strong_candle_body_ratio=strategy.strong_candle_body_ratio,
+        strong_candle_atr_mult=strategy.strong_candle_atr_mult,
+        spike_atr_mult=strategy.spike_atr_mult,
+        chop_ema_atr_mult=strategy.chop_ema_atr_mult,
+        entry_on_momentum_candle=strategy.entry_on_momentum_candle,
+        entry_on_prev_break=strategy.entry_on_prev_break,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -228,6 +245,7 @@ def _render_price_chart(
     target_tf: int,
     trade_start: time,
     trade_end: time,
+    diag,
 ) -> None:
     """Isolated chart panel — reruns only when its controls change."""
     if "chart_bars_from_end" not in st.session_state:
@@ -257,6 +275,12 @@ def _render_price_chart(
             st.session_state.chart_bars_from_end = max(0, bars_from_end - nav_step)
             _rerun_chart_panel()
     with c3:
+        show_signal_diag = st.checkbox(
+            "Signal diagnostics",
+            value=True,
+            key="chart_show_signal_diag",
+            help="Highlight signal-candle body and show body/ATR checks on hover.",
+        )
         st.caption(
             f"Loaded **{render_bar_count(int(chart_visible_bars))}** bars · "
             f"offset **{bars_from_end}** from end"
@@ -268,7 +292,8 @@ def _render_price_chart(
         visible_bars=int(chart_visible_bars),
         bars_from_end=bars_from_end,
         timeframe_minutes=target_tf,
-        show_signal_bars=False,
+        show_signal_diagnostics=show_signal_diag,
+        diag=diag,
         show_trade_labels=False,
     )
     st.markdown('<div class="price-chart-panel">', unsafe_allow_html=True)
@@ -283,8 +308,24 @@ def _render_price_chart(
     st.caption(
         f"**{len(df):,}** bars in run · **{int(chart_visible_bars)}** on screen · "
         f"**drag to pan** within loaded window · **◀ Older** for earlier history · "
-        f"{target_tf}m · {trade_start}–{trade_end} ET"
+        f"{target_tf}m · {trade_start}–{trade_end} ET · "
+        f"◆ = signal bar (hover for body/ATR math)"
     )
+
+    if show_signal_diag and diag is not None and trades:
+        render = chart_render_window(
+            df,
+            visible_bars=int(chart_visible_bars),
+            bars_from_end=bars_from_end,
+        )
+        if not render.empty:
+            t_min = render["time"].iloc[0].to_pydatetime()
+            t_max = render["time"].iloc[-1].to_pydatetime()
+            window_trades = trades_with_signal_in_window(df, trades, diag, t_min, t_max)
+            diag_df = signal_diagnostics_dataframe(df, window_trades, diag)
+            if not diag_df.empty:
+                st.markdown("**Signal bar checks** (loaded window)")
+                st.dataframe(diag_df, use_container_width=True, hide_index=True)
 
 
 def main() -> None:
@@ -387,7 +428,9 @@ def main() -> None:
                 bars_to_df(chart_bars),
                 cfg.strategy.ema_fast,
                 cfg.strategy.ema_slow,
+                atr_period=cfg.strategy.atr_period,
             )
+            st.session_state["bt_chart_diag"] = _chart_diag_from_strategy(cfg.strategy)
             st.session_state["bt_chart_trades"] = trades_in_history_window(result, data_slice)
             st.session_state.chart_bars_from_end = 0
         except Exception as exc:
@@ -480,7 +523,9 @@ def main() -> None:
                 bars_to_df(chart_bars),
                 cfg.strategy.ema_fast,
                 cfg.strategy.ema_slow,
+                atr_period=cfg.strategy.atr_period,
             )
+            st.session_state["bt_chart_diag"] = _chart_diag_from_strategy(cfg.strategy)
             st.session_state["bt_chart_trades"] = trades_in_history_window(result, data_slice)
         _render_price_chart(
             st.session_state["bt_chart_df"],
@@ -488,6 +533,7 @@ def main() -> None:
             target_tf=target_tf,
             trade_start=trade_start,
             trade_end=trade_end,
+            diag=st.session_state.get("bt_chart_diag"),
         )
 
     elif results_view == "Trades":
