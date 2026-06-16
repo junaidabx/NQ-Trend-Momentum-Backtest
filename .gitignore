@@ -50,7 +50,7 @@ Thumbs.db
 
 # Large local data (upload CSV in app or add via LFS if needed)
 NQ Data/
-data/*.csv
+# data/*.csv
 
 # Misc
 *.log
